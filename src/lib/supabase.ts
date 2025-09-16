@@ -11,7 +11,7 @@ export interface Member {
   dni: string
   name: string
   phone?: string
-  membership_type: 'mensual' | 'trimestral' | 'semestral' | 'anual'
+  membership_type: string // Changed from literal union to string to allow dynamic types
   start_date: string
   expiry_date: string
   created_at?: string
@@ -37,6 +37,8 @@ export interface CheckIn {
   created_at?: string
 }
 
+// Keep the default prices for backwards compatibility
+// These can be used as fallbacks when admin data isn't available
 export const membershipPrices = {
   mensual: 15000,
   trimestral: 40000,

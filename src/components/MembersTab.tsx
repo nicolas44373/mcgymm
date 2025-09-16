@@ -5,10 +5,25 @@ import { useForm } from 'react-hook-form'
 import { useMembers } from '@/hooks/useMembers'
 import { Member } from '@/lib/supabase'
 import { format, differenceInDays } from 'date-fns'
-import { Edit, RotateCcw, Trash2, Save, RefreshCw, X, User, Calendar, Phone, CreditCard, Search } from 'lucide-react'
+import { Edit, RotateCcw, Trash2, Save, RefreshCw, X, User, Calendar, Phone, CreditCard, Search, Filter } from 'lucide-react'
 
-type MemberFormData = Omit<Member, 'id' | 'created_at' | 'updated_at' | 'expiry_date'>
-type MemberInput = Omit<Member, 'id' | 'created_at' | 'updated_at'>
+// Tipos que son compatibles con el sistema existente
+interface MemberFormData {
+  dni: string
+  name: string
+  phone?: string
+  membership_type: string
+  start_date: string
+}
+
+interface MemberInput {
+  dni: string
+  name: string
+  phone?: string
+  membership_type: string
+  start_date: string
+  expiry_date: string
+}
 
 // Función para obtener la fecha local en formato YYYY-MM-DD
 const getTodayLocal = () => {
@@ -31,18 +46,14 @@ const formatDateLocal = (dateString: string) => {
   return format(date, 'dd/MM/yyyy')
 }
 
-// Precios de membresías
-const membershipPrices = {
-  mensual: { label: 'Mensual', price: 15000 },
-  trimestral: { label: 'Trimestral', price: 40000 },
-  semestral: { label: 'Semestral', price: 75000 },
-  anual: { label: 'Anual', price: 140000 }
-}
+// Tipos de filtro de estado
+type StatusFilter = 'todos' | 'activos' | 'proximosvencer' | 'vencidos'
 
 export default function MembersTab() {
-  const { members, loading, saveMember, deleteMember, renewMembership } = useMembers()
+  const { members, loading, membershipTypes, saveMember, deleteMember, renewMembership } = useMembers()
   const [editingDni, setEditingDni] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState('')
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('todos')
   const [renewalModal, setRenewalModal] = useState<{ isOpen: boolean; member: Member | null }>({
     isOpen: false,
     member: null
@@ -52,19 +63,111 @@ export default function MembersTab() {
   
   const { register, handleSubmit, reset, setValue, formState: { errors, isSubmitting } } = useForm<MemberFormData>({
     defaultValues: {
+      dni: '',
+      name: '',
+      phone: '',
+      membership_type: '',
       start_date: getTodayLocal()
     }
   })
 
-  // Filtrar miembros basado en el término de búsqueda
-  const filteredMembers = members.filter(member => {
-    if (!searchTerm.trim()) return true
+  // Convertir tipos de membresía a formato para select y modal
+  const membershipOptions = membershipTypes.map(type => ({
+    value: type.id,
+    label: type.name,
+    price: type.price,
+    duration: type.duration,
+    has_personal_trainer: type.has_personal_trainer
+  }))
+
+  // Función para obtener información de membresía por ID o valor compatible
+  const getMembershipInfo = (membershipId: string) => {
+    // Primero buscar por ID exacto (UUID)
+    let membershipType = membershipTypes.find(type => type.id === membershipId)
     
-    const searchLower = searchTerm.toLowerCase().trim()
-    return (
-      member.name.toLowerCase().includes(searchLower) ||
-      member.dni.toLowerCase().includes(searchLower)
-    )
+    // Si no encuentra, buscar por compatibilidad (mensual -> Mensual, etc.)
+    if (!membershipType) {
+      membershipType = membershipTypes.find(type => {
+        const typeName = type.name.toLowerCase()
+        const searchId = membershipId.toLowerCase()
+        
+        // Mapeo inverso: de valor de BD a membership_type
+        if (searchId === 'mensual' && typeName.includes('mensual')) return true
+        if (searchId === 'trimestral' && typeName.includes('trimestral')) return true
+        if (searchId === 'semestral' && typeName.includes('semestral')) return true
+        if (searchId === 'anual' && typeName.includes('anual')) return true
+        
+        return false
+      })
+    }
+    
+    // Si aún no encuentra, devolver el primero que coincida con el patrón básico
+    if (!membershipType) {
+      const basicMemberships = {
+        'mensual': { name: 'Mensual', price: 15000 },
+        'trimestral': { name: 'Trimestral', price: 40000 },
+        'semestral': { name: 'Semestral', price: 75000 },
+        'anual': { name: 'Anual', price: 140000 }
+      }
+      
+      const basicInfo = basicMemberships[membershipId.toLowerCase() as keyof typeof basicMemberships]
+      if (basicInfo) {
+        return {
+          id: membershipId,
+          name: basicInfo.name,
+          price: basicInfo.price,
+          duration: membershipId,
+          has_personal_trainer: false
+        }
+      }
+    }
+    
+    return membershipType || {
+      id: membershipId,
+      name: membershipId,
+      price: 0,
+      duration: 'N/A',
+      has_personal_trainer: false
+    }
+  }
+
+  // Función para obtener el estado de un miembro
+  const getMemberStatus = (member: Member): 'activo' | 'proximovencer' | 'vencido' => {
+    const today = createLocalDate(getTodayLocal())
+    const expiryDate = createLocalDate(member.expiry_date)
+    const daysUntilExpiry = differenceInDays(expiryDate, today)
+    
+    if (daysUntilExpiry < 0) {
+      return 'vencido'
+    } else if (daysUntilExpiry <= 7) {
+      return 'proximovencer'
+    }
+    return 'activo'
+  }
+
+  // Filtrar miembros basado en el término de búsqueda y estado
+  const filteredMembers = members.filter(member => {
+    // Filtro por búsqueda
+    const matchesSearch = !searchTerm.trim() || 
+      member.name.toLowerCase().includes(searchTerm.toLowerCase().trim()) ||
+      member.dni.toLowerCase().includes(searchTerm.toLowerCase().trim())
+    
+    // Filtro por estado
+    if (!matchesSearch) return false
+    
+    if (statusFilter === 'todos') return true
+    
+    const memberStatus = getMemberStatus(member)
+    switch (statusFilter) {
+      case 'activos':
+        return memberStatus === 'activo'
+      case 'proximosvencer':
+        return memberStatus === 'proximovencer'
+      case 'vencidos':
+        return memberStatus === 'vencido'
+      default:
+        return true
+    }
   })
 
   const handleEdit = (member: Member) => {
@@ -82,23 +185,28 @@ export default function MembersTab() {
       dni: '',
       name: '',
       phone: '',
-      membership_type: 'mensual',
+      membership_type: '',
       start_date: getTodayLocal()
     })
   }
 
   const onSubmit = async (data: MemberFormData) => {
-    console.log('DATOS DEL FORMULARIO:')
-    console.log('Fecha de inicio del formulario:', data.start_date)
-    console.log('Fecha local actual:', getTodayLocal())
-    
-    // Add expiry_date as empty string since it will be calculated in saveMember
-    const memberInput: MemberInput = {
-      ...data,
-      expiry_date: '' // This will be calculated in the hook
+    try {
+      console.log('DATOS DEL FORMULARIO:')
+      console.log('Datos:', data)
+      
+      // Convertir los datos al formato esperado por el hook
+      const memberInput: MemberInput = {
+        ...data,
+        expiry_date: '' // This will be calculated in the hook
+      }
+      
+      await saveMember(memberInput as any)
+      handleClearForm()
+    } catch (error) {
+      console.error('Error en formulario:', error)
+      // El error ya se maneja en el hook
     }
-    await saveMember(memberInput)
-    handleClearForm()
   }
 
   const handleDelete = async (dni: string) => {
@@ -128,11 +236,11 @@ export default function MembersTab() {
           dni: renewalModal.member.dni,
           name: renewalModal.member.name,
           phone: renewalModal.member.phone,
-          membership_type: selectedMembershipType as 'mensual' | 'trimestral' | 'semestral' | 'anual',
+          membership_type: selectedMembershipType,
           start_date: getTodayLocal(),
           expiry_date: '' // Se calculará automáticamente
         }
-        await saveMember(updatedMember)
+        await saveMember(updatedMember as any)
       } else {
         await renewMembership(renewalModal.member.dni)
       }
@@ -156,6 +264,29 @@ export default function MembersTab() {
       return { className: 'bg-yellow-100 text-yellow-800', text: `Vence en ${daysUntilExpiry} días` }
     }
     return { className: 'bg-green-100 text-green-800', text: 'Activa' }
+  }
+
+  // Función para mostrar el tipo de membresía con información completa
+  const displayMembershipType = (membershipId: string) => {
+    const membershipInfo = getMembershipInfo(membershipId)
+    
+    return (
+      <div className="flex flex-col">
+        <span className="font-medium">{membershipInfo.name}</span>
+        <span className="text-xs text-gray-500">
+          ${membershipInfo.price.toLocaleString()}
+          {membershipInfo.has_personal_trainer && ' • Con Entrenador'}
+        </span>
+      </div>
+    )
+  }
+
+  // Contar miembros por estado
+  const statusCounts = {
+    todos: members.length,
+    activos: members.filter(m => getMemberStatus(m) === 'activo').length,
+    proximosvencer: members.filter(m => getMemberStatus(m) === 'proximovencer').length,
+    vencidos: members.filter(m => getMemberStatus(m) === 'vencido').length
   }
 
   if (loading) {
@@ -221,10 +352,12 @@ export default function MembersTab() {
                 className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-colors"
               >
                 <option value="">Seleccionar</option>
-                <option value="mensual">Mensual - $15,000</option>
-                <option value="trimestral">Trimestral - $40,000</option>
-                <option value="semestral">Semestral - $75,000</option>
-                <option value="anual">Anual - $140,000</option>
+                {membershipOptions.map(option => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} - ${option.price.toLocaleString()}
+                    {option.has_personal_trainer ? ' (Con Entrenador)' : ''}
+                  </option>
+                ))}
               </select>
               {errors.membership_type && (
                 <p className="text-red-500 text-sm mt-1">{errors.membership_type.message}</p>
@@ -266,8 +399,9 @@ export default function MembersTab() {
         </form>
       </div>
 
-      {/* Buscador */}
-      <div className="mb-6">
+      {/* Filtros */}
+      <div className="mb-6 space-y-4">
+        {/* Buscador */}
         <div className="relative max-w-md">
           <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={20} />
           <input
@@ -278,8 +412,62 @@ export default function MembersTab() {
             className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 rounded-lg focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-colors"
           />
         </div>
-        {searchTerm && (
-          <p className="text-sm text-gray-600 mt-2">
+
+        {/* Filtros de Estado */}
+        <div className="flex flex-wrap gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+            <Filter size={16} />
+            Filtrar por estado:
+          </div>
+          
+          <button
+            onClick={() => setStatusFilter('todos')}
+            className={`px-4 py-2 rounded-full text-sm font-semibold transition-all ${
+              statusFilter === 'todos'
+                ? 'bg-blue-500 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Todos ({statusCounts.todos})
+          </button>
+          
+          <button
+            onClick={() => setStatusFilter('activos')}
+            className={`px-4 py-2 rounded-full text-sm font-semibold transition-all ${
+              statusFilter === 'activos'
+                ? 'bg-green-500 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Activos ({statusCounts.activos})
+          </button>
+          
+          <button
+            onClick={() => setStatusFilter('proximosvencer')}
+            className={`px-4 py-2 rounded-full text-sm font-semibold transition-all ${
+              statusFilter === 'proximosvencer'
+                ? 'bg-yellow-500 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Próximos a Vencer ({statusCounts.proximosvencer})
+          </button>
+          
+          <button
+            onClick={() => setStatusFilter('vencidos')}
+            className={`px-4 py-2 rounded-full text-sm font-semibold transition-all ${
+              statusFilter === 'vencidos'
+                ? 'bg-red-500 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            Vencidos ({statusCounts.vencidos})
+          </button>
+        </div>
+
+        {/* Contador de resultados */}
+        {(searchTerm || statusFilter !== 'todos') && (
+          <p className="text-sm text-gray-600">
             Mostrando {filteredMembers.length} de {members.length} clientes
           </p>
         )}
@@ -294,7 +482,6 @@ export default function MembersTab() {
                 <th className="px-6 py-4 text-left font-semibold">DNI</th>
                 <th className="px-6 py-4 text-left font-semibold">Nombre</th>
                 <th className="px-6 py-4 text-left font-semibold">Teléfono</th>
-                <th className="px-6 py-4 text-left font-semibold">Membresía</th>
                 <th className="px-6 py-4 text-left font-semibold">Inicio</th>
                 <th className="px-6 py-4 text-left font-semibold">Vencimiento</th>
                 <th className="px-6 py-4 text-left font-semibold">Estado</th>
@@ -309,7 +496,6 @@ export default function MembersTab() {
                     <td className="px-6 py-4 font-medium">{member.dni}</td>
                     <td className="px-6 py-4">{member.name}</td>
                     <td className="px-6 py-4">{member.phone || '-'}</td>
-                    <td className="px-6 py-4 capitalize font-medium">{member.membership_type}</td>
                     <td className="px-6 py-4">{formatDateLocal(member.start_date)}</td>
                     <td className="px-6 py-4">{formatDateLocal(member.expiry_date)}</td>
                     <td className="px-6 py-4">
@@ -351,7 +537,12 @@ export default function MembersTab() {
                     <div className="flex flex-col items-center gap-2">
                       <Search size={48} className="text-gray-300" />
                       <p className="text-lg">No se encontraron clientes</p>
-                      <p className="text-sm">Intenta con otro término de búsqueda</p>
+                      <p className="text-sm">
+                        {statusFilter !== 'todos' 
+                          ? `No hay clientes con estado "${statusFilter === 'proximosvencer' ? 'próximos a vencer' : statusFilter}"`
+                          : 'Intenta con otro término de búsqueda'
+                        }
+                      </p>
                     </div>
                   </td>
                 </tr>
@@ -424,11 +615,11 @@ export default function MembersTab() {
                   Seleccionar Tipo de Membresía
                 </h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {Object.entries(membershipPrices).map(([type, info]) => (
+                  {membershipOptions.map(option => (
                     <label
-                      key={type}
+                      key={option.value}
                       className={`p-4 border-2 rounded-lg cursor-pointer transition-all ${
-                        selectedMembershipType === type
+                        selectedMembershipType === option.value
                           ? 'border-yellow-500 bg-yellow-50'
                           : 'border-gray-200 hover:border-gray-300'
                       }`}
@@ -436,16 +627,22 @@ export default function MembersTab() {
                       <input
                         type="radio"
                         name="membershipType"
-                        value={type}
-                        checked={selectedMembershipType === type}
+                        value={option.value}
+                        checked={selectedMembershipType === option.value}
                         onChange={(e) => setSelectedMembershipType(e.target.value)}
                         className="sr-only"
                       />
-                      <div className="flex justify-between items-center">
-                        <span className="font-medium capitalize">{info.label}</span>
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="font-medium">{option.label}</span>
                         <span className="text-lg font-bold text-green-600">
-                          ${info.price.toLocaleString()}
+                          ${option.price.toLocaleString()}
                         </span>
+                      </div>
+                      <div className="text-sm text-gray-600">
+                        <p>Duración: {option.duration}</p>
+                        {option.has_personal_trainer && (
+                          <p className="text-blue-600 font-medium">✓ Incluye Entrenador Personal</p>
+                        )}
                       </div>
                     </label>
                   ))}
